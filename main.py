@@ -54,6 +54,7 @@ menu = st.sidebar.radio(
         "🔧 Исправление договоров",
         "⚠️ Контроль",
         "📇 Справочник",
+        "📥 Загрузка справочников",
         "🔀 Объединение дубликатов",
         "⚙️ Настройки"  # ← Добавлено
     ],
@@ -97,6 +98,12 @@ elif menu == "⚠️ Контроль":
 elif menu == "📇 Справочник":
     if TRACKER_AVAILABLE:
         tracker.show_directory()
+    else:
+        st.error("Модуль tracker не загружен")
+
+elif menu == "📥 Загрузка справочников":
+    if TRACKER_AVAILABLE:
+        tracker.show_import_reference()
     else:
         st.error("Модуль tracker не загружен")
 

@@ -96,6 +96,83 @@ def update_organization(name, email=None, contact_person=None):
     save_config(config)
     return True, "Организация обновлена"
 
+def import_organizations(records, mode="merge"):
+    """Массовая загрузка организаций из списка словарей [{'name','email','contact_person'}].
+
+    mode == "merge"  — дополняет справочник: новые добавляются,
+                       существующие обновляют email/контакт, если пришли непустые значения.
+    mode == "replace" — полностью заменяет справочник organizations переданными данными.
+
+    Возвращает: (stats, errors), где stats = {"added", "updated", "skipped", "total"}
+    """
+    if mode == "replace":
+        email_mapping = {}
+    else:
+        config = load_config() or get_default_config()
+        email_mapping = config.get("email_mapping", {})
+
+    added = updated = skipped = 0
+    errors = []
+
+    for i, rec in enumerate(records, start=1):
+        name = str(rec.get("name") or "").strip()
+        email = str(rec.get("email") or "").strip().lower()
+        contact = str(rec.get("contact_person") or "").strip()
+
+        if not name:
+            errors.append(f"Строка {i}: пустое название организации")
+            continue
+        if "@" not in email:
+            errors.append(f"Строка {i} («{name}»): некорректный email «{email}»")
+            continue
+
+        if name in email_mapping:
+            new_email = email if email else None
+            if new_email and new_email != email_mapping[name]:
+                email_mapping[name] = new_email
+                updated += 1
+            else:
+                skipped += 1
+        else:
+            email_mapping[name] = email
+            added += 1
+
+        # контакт сохраняем в БД (если строка валидна)
+        try:
+            _update_contact_in_db(name, contact)
+        except Exception:
+            pass
+
+    config = load_config() or get_default_config()
+    config["email_mapping"] = email_mapping
+    save_config(config)
+
+    return {"added": added, "updated": updated, "skipped": skipped,
+            "total": added + updated + skipped}, errors
+
+
+def _update_contact_in_db(name, contact):
+    """Обновляет контактное лицо организации в базе данных (если она там есть)."""
+    import sqlite3
+    from pathlib import Path as _Path
+    db_file = _Path(__file__).parent.parent / "zhku_database.db"
+    if not db_file.exists():
+        return
+    conn = sqlite3.connect(str(db_file))
+    cursor = conn.cursor()
+    cursor.execute('SELECT id FROM organizations WHERE name = ?', (name,))
+    row = cursor.fetchone()
+    if row:
+        if contact:
+            cursor.execute('UPDATE organizations SET contact_person = ? WHERE name = ?',
+                           (contact, name))
+    else:
+        cursor.execute('INSERT INTO organizations (name, email, contact_person) VALUES (?, ?, ?)',
+                       (name, "", contact))
+    conn.commit()
+    conn.close()
+
+
 def delete_organization(name):
     """Удаляет организацию из config.json"""
     config = load_config()
