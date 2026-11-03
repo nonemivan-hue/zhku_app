@@ -1,0 +1,16 @@
+{
+    "paths": {
+        "root_folder": "Z:\\ЖКУ",
+        "mail_base": "W:\\Poste\\2026\\10",
+        "reference_base": "Z:\\ЖКУ\\Выгрузка 2026\\10",
+        "output_base": "W:\\Poste\\2026\\10\\ответы жку",
+        "adler_source": "D:\\тестирование ЖКУ\\Текущая выгрузка",
+        "adler_dest": "D:\\тестирование ЖКУ\\Почтовые адреса"
+    },
+    "email_mapping": {},
+    "app_settings": {
+        "theme": "dark",
+        "language": "ru",
+        "auto_scan": false
+    }
+}
