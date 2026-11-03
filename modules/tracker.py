@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 from pathlib import Path
 import plotly.express as px
+import io
 import re
 from datetime import datetime
 import sys
@@ -772,6 +773,199 @@ def show_directory():
         df_orgs['contact_person'] = df_orgs['name'].map(contact_data)
         
         st.dataframe(df_orgs[['name', 'email', 'contact_person']], use_container_width=True, height=400)
+
+
+# ==========================================
+#  ЗАГРУЗКА СПРАВОЧНИКОВ (импорт из файлов)
+# ==========================================
+
+# Варианты названий колонок в загружаемых файлах
+REF_NAME_ALIASES = ["name", "название", "организация", "наименование",
+                    "уо", "управляющая организация", "ук", "поставщик", "адресат"]
+REF_EMAIL_ALIASES = ["email", "e-mail", "почта", "электронная почта",
+                     "эл. почта", "адрес почты", "mail"]
+REF_CONTACT_ALIASES = ["contact", "contact_person", "контакт", "контактное лицо",
+                       "ответственный", "физлицо"]
+
+
+def _find_column(columns, aliases):
+    """Ищет колонку по списку возможных названий (без учёта регистра/пробелов)."""
+    norm_cols = {re.sub(r"[\s_\-\.]+", " ", str(c).strip().lower()): c for c in columns}
+    for alias in aliases:
+        key = re.sub(r"[\s_\-\.]+", " ", alias.lower())
+        if key in norm_cols:
+            return norm_cols[key]
+    # частичное совпадение
+    for alias in aliases:
+        key = re.sub(r"[\s_\-\.]+", " ", alias.lower())
+        for norm_c, orig_c in norm_cols.items():
+            if key in norm_c or norm_c in key:
+                return orig_c
+    return None
+
+
+def parse_reference_file(uploaded_file):
+    """Читает файл справочника (xlsx/xls/ods/csv/txt/json) и возвращает DataFrame
+    с нормализованными колонками name / email / contact_person."""
+    ext = uploaded_file.name.rsplit(".", 1)[-1].lower()
+    data = uploaded_file.getvalue()
+
+    if ext == "json":
+        import json as _json
+        obj = _json.loads(data.decode("utf-8-sig"))
+        if isinstance(obj, dict):
+            # config.json — берём email_mapping
+            mapping = obj.get("email_mapping")
+            if mapping is None:
+                raise ValueError("В JSON не найден словарь 'email_mapping'")
+            df = pd.DataFrame([{"name": k, "email": v} for k, v in mapping.items()])
+            return df
+        df = pd.DataFrame(obj)
+    elif ext in ("csv", "txt"):
+        text = data.decode("utf-8-sig", errors="replace")
+        sep = ";" if text.count(";") > text.count(",") else ","
+        df = pd.read_csv(io.StringIO(text), sep=sep)
+    else:  # xlsx / xls / ods
+        df = pd.read_excel(io.BytesIO(data))
+
+    df.columns = [str(c).strip() for c in df.columns]
+
+    name_col = _find_column(df.columns, REF_NAME_ALIASES)
+    email_col = _find_column(df.columns, REF_EMAIL_ALIASES)
+
+    if name_col is None:
+        raise ValueError(
+            f"Не найдена колонка с названием организации. Колонки файла: {list(df.columns)}. "
+            "Ожидаются: «Название» / «Организация», «Email» / «Почта»."
+        )
+
+    result = pd.DataFrame()
+    result["name"] = df[name_col].fillna("").astype(str).str.strip()
+    if email_col is not None:
+        result["email"] = df[email_col].fillna("").astype(str).str.strip().str.lower()
+    else:
+        result["email"] = ""
+
+    contact_col = _find_column(df.columns, REF_CONTACT_ALIASES)
+    if contact_col is not None:
+        result["contact_person"] = df[contact_col].fillna("").astype(str).str.strip()
+    else:
+        result["contact_person"] = ""
+
+    # очищаем текстовые "nan" и убираем пустые строки
+    for col in ("email", "contact_person"):
+        result[col] = result[col].replace({"nan": "", "none": "", "None": ""})
+    result = result[result["name"].ne("") & (result["name"].str.lower() != "nan")]
+    return result.reset_index(drop=True)
+
+
+def show_import_reference():
+    """Вкладка: Загрузка справочников из файлов Excel/CSV/JSON."""
+    st.title("📥 Загрузка справочников")
+    st.markdown(
+        "Загрузите файл со списком организаций, чтобы массово обновить справочник. "
+        "Поддерживаются форматы **Excel (.xlsx/.xls)**, **CSV/TXT** и **JSON** (в т.ч. config.json коллег)."
+    )
+
+    with st.expander("ℹ️ Какой формат должен быть у файла", expanded=False):
+        st.markdown(
+            "Файл должен содержать колонки (названия могут отличаться, скрипт поймёт):\n\n"
+            "| Колонка | Примеры названий | Обязательно |\n"
+            "|---|---|---|\n"
+            "| Название организации | `Название`, `Организация`, `Наименование`, `УО` | ✅ |\n"
+            "| Email | `Email`, `Почта`, `E-mail` | ✅ |\n"
+            "| Контактное лицо | `Контакт`, `Ответственный` | ❌ |"
+        )
+        sample = pd.DataFrame({
+            "Название организации": ["ООО Управление-1", "ЖК Сервис"],
+            "Email": ["uk1@mail.ru", "jkservise@yandex.ru"],
+            "Контактное лицо": ["Иванова А.П.", "Петров С.С."],
+        })
+        st.download_button(
+            "⬇️ Скачать образец (Excel)",
+            to_excel_bytes(sample),
+            file_name="образец_справочника.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    uploaded = st.file_uploader(
+        "Выберите файл справочника",
+        type=["xlsx", "xls", "csv", "txt", "json", "ods"],
+        key="ref_file_uploader",
+    )
+
+    parsed_df = None
+    if uploaded is not None:
+        try:
+            parsed_df = parse_reference_file(uploaded)
+        except Exception as e:
+            st.error(f"❌ Не удалось прочитать файл: {e}")
+            parsed_df = None
+
+    if parsed_df is not None:
+        if parsed_df.empty:
+            st.warning("⚠️ В файле не найдено ни одной строки с названием организации.")
+            return
+
+        st.success(f"✅ Файл прочитан: {len(parsed_df)} организаций")
+
+        # подсветка строк с некорректными email
+        def _row_style(row):
+            color = "#ffcccc" if "@" not in row["email"] else ""
+            return [f"background-color: {color}"] * len(row)
+
+        st.dataframe(parsed_df.style.apply(_row_style, axis=1),
+                     use_container_width=True, height=min(400, 60 + 35 * len(parsed_df)))
+
+        bad = (~parsed_df["email"].str.contains("@")).sum()
+        if bad:
+            st.warning(f"⚠️ В {bad} строках(е) указан некорректный email — они будут пропущены.")
+
+        mode_label = st.radio(
+            "Режим загрузки",
+            ["Дополнить (новые добавить, совпадающие обновить)",
+             "Заменить (полностью перезаписать справочник)"],
+            index=0,
+            horizontal=True,
+        )
+        mode = "merge" if mode_label.startswith("Дополнить") else "replace"
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📤 Загрузить в справочник", type="primary", use_container_width=True):
+                records = parsed_df.to_dict("records")
+                with st.spinner("Загружаю..."):
+                    stats, errors = config_manager.import_organizations(records, mode=mode)
+                # синхронизируем БД и чистим кэш
+                init_db()
+                get_all_organizations_cached.clear()
+                st.session_state["import_ref_result"] = (stats, errors)
+                st.rerun()
+        with col2:
+            if st.button("🧹 Очистить", use_container_width=True):
+                st.session_state.pop("ref_file_uploader", None)
+                st.rerun()
+
+    result = st.session_state.pop("import_ref_result", None)
+    if result:
+        stats, errors = result
+        st.success(
+            f"✅ Загрузка завершена: добавлено {stats['added']}, "
+            f"обновлено {stats['updated']}, без изменений {stats['skipped']} "
+            f"(всего обработано {stats['total']})"
+        )
+        if errors:
+            with st.expander(f"⚠️ Пропущенные строки ({len(errors)})"):
+                for err in errors:
+                    st.text(err)
+
+
+def to_excel_bytes(df):
+    """Конвертирует DataFrame в bytes xlsx для кнопки скачивания."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return buf.getvalue()
 
 
 def show_merge():
